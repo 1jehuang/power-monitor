@@ -18,8 +18,9 @@ Written in Rust around a single `poll(2)` loop:
 - AC plug/unplug and battery status changes arrive via kernel uevents,
 - live RAPL counters provide the rail split when readable. Otherwise inotify
   watches the battery profiler (`/var/log/battery-profiler`) for new samples,
-- under niri, the timer is disarmed while the workspace or tiled window is
-  off-screen. Compositor events still wake the watcher, but no sampling runs.
+- under niri, the timer is disarmed while the workspace is hidden.
+  Unknown/null tile geometry is not treated as hidden. Compositor events
+  still wake the watcher, but no sampling runs on hidden workspaces.
   Power/profiler notifications are not polled while hidden,
 - signalfd handles resize and quit; ratatui only redraws changed cells.
 

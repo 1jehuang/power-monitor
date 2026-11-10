@@ -40,8 +40,8 @@ def main():
         helper = path / "niri"
         helper.write_text('''#!/usr/bin/env python3
 import json,os
-print(json.dumps({"WorkspacesChanged":{"workspaces":[{"id":1,"output":"test","is_active":True}]}}),flush=True)
-print(json.dumps({"WindowsChanged":{"windows":[{"id":1,"pid":int(os.environ["TEST_TERMINAL_PID"]),"app_id":"power-monitor","workspace_id":1,"layout":{"tile_pos_in_workspace_view":[0,0]}}]}}),flush=True)
+print(json.dumps({"WorkspacesChanged":{"workspaces":[{"id":1,"output":"test","is_active":True},{"id":2,"output":"test","is_active":False}]}}),flush=True)
+print(json.dumps({"WindowsChanged":{"windows":[{"id":1,"pid":int(os.environ["TEST_TERMINAL_PID"]),"app_id":"power-monitor","workspace_id":1,"layout":{"tile_pos_in_workspace_view":None}}]}}),flush=True)
 with open(os.environ["TEST_EVENTS"]) as events:
     for line in events:
         print(line,end="",flush=True)
@@ -55,14 +55,14 @@ with open(os.environ["TEST_EVENTS"]) as events:
         try:
             with open(fifo, "w", buffering=1) as events:
                 assert b"power" in drain(master, 1.5)
-                # Active workspace, but tile scrolled off-screen.
-                events.write(json.dumps({"WindowLayoutsChanged":{"changes":[[1,{"tile_pos_in_workspace_view":None}]]}}) + "\n")
+                assert drain(master, 1.3), "visible window with null geometry froze"
+                events.write(json.dumps({"WorkspaceActivated":{"id":2}}) + "\n")
                 drain(master, 0.3)
                 calls = read_calls(proc.pid)
                 output = drain(master, 2.3)
                 assert output == b"", f"hidden window wrote {len(output)} bytes"
-                assert read_calls(proc.pid) == calls, "sampling continued while off-screen"
-                events.write(json.dumps({"WindowLayoutsChanged":{"changes":[[1,{"tile_pos_in_workspace_view":[0,0]}]]}}) + "\n")
+                assert read_calls(proc.pid) == calls, "sampling continued on hidden workspace"
+                events.write(json.dumps({"WorkspaceActivated":{"id":1}}) + "\n")
                 assert drain(master, 1.3), "did not resume on visibility event"
                 for columns, rows in [(64,12), (40,16), (24,16), (2,2), (120,30)]:
                     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
@@ -72,7 +72,7 @@ with open(os.environ["TEST_EVENTS"]) as events:
                 os.kill(proc.pid, signal.SIGTERM)
                 assert proc.wait(timeout=5) == 0
                 assert not (termios.tcgetattr(slave)[3] & termios.ICANON) == 0, "raw terminal not restored"
-                print("PASS: hidden tile stops reads/output, visible resumes, five resizes, SIGTERM restores terminal")
+                print("PASS: null geometry stays live, hidden workspace stops reads/output, resume, five resizes, SIGTERM restores terminal")
         finally:
             if proc.poll() is None:
                 proc.kill()

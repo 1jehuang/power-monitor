@@ -22,8 +22,6 @@ struct Visibility {
     ancestors: HashSet<i64>,
     /// window id -> (pid, workspace id, app id)
     windows: HashMap<i64, (i64, Option<i64>, String)>,
-    offscreen: HashSet<i64>,
-    floating: HashSet<i64>,
     /// workspace id -> (output, is_active)
     workspaces: HashMap<i64, (Option<String>, bool)>,
     overview: bool,
@@ -139,16 +137,6 @@ impl Drop for Watcher {
 impl Visibility {
     fn put_window(&mut self, w: &Value) {
         if let Some(id) = w["id"].as_i64() {
-            if w["is_floating"].as_bool().unwrap_or(false) {
-                self.floating.insert(id);
-            } else {
-                self.floating.remove(&id);
-            }
-            self.put_layout(
-                id,
-                &w["layout"],
-                w["is_floating"].as_bool().unwrap_or(false),
-            );
             let app = w["app_id"].as_str().unwrap_or_default().to_string();
             self.windows.insert(
                 id,
@@ -158,18 +146,6 @@ impl Visibility {
                     app,
                 ),
             );
-        }
-    }
-
-    fn put_layout(&mut self, id: i64, layout: &Value, floating: bool) {
-        if !floating
-            && layout
-                .get("tile_pos_in_workspace_view")
-                .is_some_and(Value::is_null)
-        {
-            self.offscreen.insert(id);
-        } else {
-            self.offscreen.remove(&id);
         }
     }
 
@@ -199,25 +175,14 @@ impl Visibility {
             }
             "WindowsChanged" => {
                 self.windows.clear();
-                self.offscreen.clear();
-                self.floating.clear();
                 for w in e["windows"].as_array().into_iter().flatten() {
                     self.put_window(w);
                 }
             }
             "WindowOpenedOrChanged" => self.put_window(&e["window"]),
-            "WindowLayoutsChanged" => {
-                for change in e["changes"].as_array().into_iter().flatten() {
-                    if let Some(id) = change[0].as_i64() {
-                        self.put_layout(id, &change[1], self.floating.contains(&id));
-                    }
-                }
-            }
             "WindowClosed" => {
                 if let Some(id) = e["id"].as_i64() {
                     self.windows.remove(&id);
-                    self.offscreen.remove(&id);
-                    self.floating.remove(&id);
                 }
             }
             "OverviewOpenedOrClosed" => self.overview = e["is_open"].as_bool().unwrap_or(false),
@@ -241,8 +206,8 @@ impl Visibility {
         }
         let tagged = ours.iter().any(|(_, (_, _, app))| app == "power-monitor");
         // A terminal process can own several windows; visible if any is shown.
-        ours.iter().any(|(id, (_, ws, app))| {
-            if (tagged && app != "power-monitor") || self.offscreen.contains(id) {
+        ours.iter().any(|(_, (_, ws, app))| {
+            if tagged && app != "power-monitor" {
                 return false;
             }
             match ws {
@@ -283,12 +248,18 @@ mod tests {
     }
 
     #[test]
-    fn offscreen_tile_pauses_even_on_active_workspace() {
+    fn null_tile_position_does_not_hide_active_workspace() {
         let mut s = state();
+        // Real compositor snapshots can report null even for visible windows.
+        // It is unknown geometry, not sufficient evidence to stop sampling.
+        s.apply(&json!({"WindowOpenedOrChanged":{"window":
+            {"id":1,"pid":42,"app_id":"power-monitor","workspace_id":1,
+             "is_focused":true,"layout":{"tile_pos_in_workspace_view":null}}}}));
+        assert!(s.visible());
         s.apply(
             &json!({"WindowLayoutsChanged":{"changes":[[1,{"tile_pos_in_workspace_view":null}]]}}),
         );
-        assert!(!s.visible());
+        assert!(s.visible());
         s.apply(
             &json!({"WindowLayoutsChanged":{"changes":[[1,{"tile_pos_in_workspace_view":[0,0]}]]}}),
         );
