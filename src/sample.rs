@@ -4,19 +4,33 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// A sysfs attribute held open across reads.
 pub struct Attr {
     path: String,
     file: Option<File>,
+    cache_for: Duration,
+    cached: Option<(Instant, Option<String>)>,
+    retry_at: Instant,
 }
 
 impl Attr {
     pub fn new(path: impl Into<String>) -> Self {
         let path = path.into();
         let file = File::open(&path).ok();
-        Self { path, file }
+        Self {
+            path,
+            file,
+            cache_for: Duration::ZERO,
+            cached: None,
+            retry_at: Instant::now(),
+        }
+    }
+
+    fn slow(mut self) -> Self {
+        self.cache_for = Duration::from_secs(10);
+        self
     }
 
     pub fn exists(&self) -> bool {
@@ -24,13 +38,29 @@ impl Attr {
     }
 
     pub fn text(&mut self) -> Option<String> {
+        let now = Instant::now();
+        if let Some((at, value)) = &self.cached {
+            if now.duration_since(*at) < self.cache_for {
+                return value.clone();
+            }
+        }
+        if self.file.is_none() && now >= self.retry_at {
+            self.file = File::open(&self.path).ok();
+            self.retry_at = now + Duration::from_secs(10);
+        }
+        let value = self.read_text();
+        self.cached = Some((now, value.clone()));
+        value
+    }
+
+    fn read_text(&mut self) -> Option<String> {
         let f = self.file.as_ref()?;
         let mut buf = [0u8; 512];
         match f.read_at(&mut buf, 0) {
             Ok(n) => Some(String::from_utf8_lossy(&buf[..n]).trim().to_string()),
             Err(_) => {
                 // The device went away (e.g. a driver rebind): try reopening once.
-                self.file = File::open(&self.path).ok();
+                self.file = None;
                 None
             }
         }
@@ -182,13 +212,17 @@ struct RaplZone {
 
 fn rapl_zones() -> Vec<RaplZone> {
     let mut v = Vec::new();
-    let Ok(dir) = fs::read_dir("/sys/class/powercap") else { return v };
+    let Ok(dir) = fs::read_dir("/sys/class/powercap") else {
+        return v;
+    };
     for e in dir.flatten() {
         let d = e.path();
         if !e.file_name().to_string_lossy().starts_with("intel-rapl:") {
             continue;
         }
-        let Ok(name) = fs::read_to_string(d.join("name")) else { continue };
+        let Ok(name) = fs::read_to_string(d.join("name")) else {
+            continue;
+        };
         let energy = Attr::new(d.join("energy_uj").to_string_lossy().into_owned());
         if energy.file.is_none() {
             continue;
@@ -197,7 +231,12 @@ fn rapl_zones() -> Vec<RaplZone> {
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(i64::MAX);
-        v.push(RaplZone { name: name.trim().to_string(), energy, range, last: None });
+        v.push(RaplZone {
+            name: name.trim().to_string(),
+            energy,
+            range,
+            last: None,
+        });
     }
     v
 }
@@ -215,6 +254,7 @@ pub struct Sampler {
     last: Option<(Instant, Option<i64>)>,
     deep: VecDeque<(f64, f64)>,
     cpu: VecDeque<(f64, HashMap<String, u64>)>,
+    last_process_scan: Option<Instant>,
 
     pub hz: f64,
     pub ncpu: usize,
@@ -230,20 +270,62 @@ pub struct Sampler {
 }
 
 impl Sampler {
+    #[cfg(test)]
+    pub fn demo_activity(&mut self) {
+        let attr = |value: &str| {
+            let mut a = Attr::new("/nonexistent/demo-attribute").slow();
+            a.cached = Some((Instant::now(), Some(value.into())));
+            a
+        };
+        self.profile = attr("balanced");
+        self.epp = attr("balance_power");
+        self.gov = attr("powersave");
+        self.bl = Some((attr("35"), attr("100")));
+        self.lpi = Attr::new("/dev/null");
+        self.deep = [(5_000_000.0, 1_500_000.0)].into();
+        self.ncpu = 16;
+        self.hz = 100.0;
+        self.cpu = [(
+            5.0,
+            HashMap::from([
+                ("jcode".into(), 125),
+                ("kitty".into(), 20),
+                ("niri".into(), 15),
+                ("power-monitor".into(), 1),
+            ]),
+        )]
+        .into();
+        self.rails = Some(Rails {
+            package: 3.2,
+            core: 1.2,
+            uncore: 0.4,
+            dram: 0.3,
+            psys: 7.5,
+        });
+        self.live_rails = true;
+    }
+
     pub fn new() -> Self {
         let cpu = "/sys/devices/system/cpu";
         Self {
             bat: first_dir("/sys/class/power_supply", Some("Battery")).map(|d| Battery::new(&d)),
             lpi: Attr::new(format!("{cpu}/cpuidle/low_power_idle_cpu_residency_us")),
-            profile: Attr::new("/sys/firmware/acpi/platform_profile"),
-            epp: Attr::new(format!("{cpu}/cpu0/cpufreq/energy_performance_preference")),
-            gov: Attr::new(format!("{cpu}/cpu0/cpufreq/scaling_governor")),
-            bl: first_dir("/sys/class/backlight", None)
-                .map(|d| (Attr::new(format!("{d}/brightness")), Attr::new(format!("{d}/max_brightness")))),
-            procs: ProcScan { procs: HashMap::new() },
+            profile: Attr::new("/sys/firmware/acpi/platform_profile").slow(),
+            epp: Attr::new(format!("{cpu}/cpu0/cpufreq/energy_performance_preference")).slow(),
+            gov: Attr::new(format!("{cpu}/cpu0/cpufreq/scaling_governor")).slow(),
+            bl: first_dir("/sys/class/backlight", None).map(|d| {
+                (
+                    Attr::new(format!("{d}/brightness")).slow(),
+                    Attr::new(format!("{d}/max_brightness")).slow(),
+                )
+            }),
+            procs: ProcScan {
+                procs: HashMap::new(),
+            },
             last: None,
             deep: VecDeque::with_capacity(5),
             cpu: VecDeque::with_capacity(5),
+            last_process_scan: None,
             // SAFETY: plain libc queries.
             hz: (unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).max(1) as f64,
             ncpu: (unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }).max(1) as usize,
@@ -267,10 +349,18 @@ impl Sampler {
         };
         let (now, full, design) = if b.energy_now.exists() {
             let e = |a: &mut Attr| a.num().unwrap_or(0) as f64 / 1e6;
-            (e(&mut b.energy_now), e(&mut b.energy_full), e(&mut b.energy_design))
+            (
+                e(&mut b.energy_now),
+                e(&mut b.energy_full),
+                e(&mut b.energy_design),
+            )
         } else {
             let c = |a: &mut Attr| a.num().unwrap_or(0) as f64 / 1e6 * volts;
-            (c(&mut b.charge_now), c(&mut b.charge_full), c(&mut b.charge_design))
+            (
+                c(&mut b.charge_now),
+                c(&mut b.charge_full),
+                c(&mut b.charge_design),
+            )
         };
         self.bat_state = BatState {
             status: b.status.text().unwrap_or_else(|| "?".into()),
@@ -278,7 +368,11 @@ impl Sampler {
             watts,
             wh_now: now,
             wh_full: full,
-            health: if design > 0.0 { (full / design * 100.0) as i64 } else { 100 },
+            health: if design > 0.0 {
+                (full / design * 100.0) as i64
+            } else {
+                100
+            },
         };
     }
 
@@ -290,6 +384,7 @@ impl Sampler {
             z.last = z.energy.num();
         }
         self.procs.scan();
+        self.last_process_scan = Some(Instant::now());
         self.last = Some((Instant::now(), self.lpi.num()));
     }
 
@@ -301,24 +396,41 @@ impl Sampler {
         }
         self.bat_hist.push_back(self.bat_state.watts);
         let secs = self.last.map(|(t, _)| now.duration_since(t).as_secs_f64());
+        let was_live = self.live_rails;
         let live = self.read_rapl(secs);
-        if let Some(w) = live.or((self.rapl.is_empty() || !self.live_rails).then_some(self.bat_state.watts)) {
-            if self.hist.len() == 300 {
-                self.hist.pop_front();
-            }
-            self.hist.push_back(w);
+        if was_live != self.live_rails {
+            // Never mix two different sensors under one graph/source label.
+            self.hist.clear();
         }
+        let w = live.unwrap_or(self.bat_state.watts);
+        if self.hist.len() == 300 {
+            self.hist.pop_front();
+        }
+        self.hist.push_back(w);
 
         let lpi = self.lpi.num();
-        let (deltas, jcode) = self.procs.scan();
-        self.jcode = jcode;
+        // Process accounting is displayed over five seconds. Reading every
+        // /proc task every second merely repeats work without better resolution
+        // for that view. Keep the graph/RAPL sampling at one second.
+        if self
+            .last_process_scan
+            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(5))
+        {
+            let (deltas, jcode) = self.procs.scan();
+            self.jcode = jcode;
+            if let Some(then) = self.last_process_scan {
+                self.cpu.clear();
+                self.cpu
+                    .push_back((now.duration_since(then).as_secs_f64(), deltas));
+            }
+            self.last_process_scan = Some(now);
+        }
         if let Some((then, prev_lpi)) = self.last {
             let secs = now.duration_since(then).as_secs_f64();
             if secs > 0.0 {
                 if let (Some(a), Some(b)) = (prev_lpi, lpi) {
                     push5(&mut self.deep, (secs * 1e6, (b - a).max(0) as f64));
                 }
-                push5(&mut self.cpu, (secs, deltas));
             }
         }
         self.last = Some((now, lpi));
@@ -326,18 +438,29 @@ impl Sampler {
 
     /// Read every RAPL counter; returns psys watts once two reads exist.
     fn read_rapl(&mut self, secs: Option<f64>) -> Option<f64> {
+        self.live_rails = false;
         let mut w: HashMap<String, f64> = HashMap::new();
         for z in &mut self.rapl {
-            let Some(e) = z.energy.num() else { continue };
+            let Some(e) = z.energy.num() else {
+                z.last = None;
+                continue;
+            };
             if let (Some(prev), Some(s)) = (z.last, secs.filter(|s| *s > 0.0)) {
-                let d = if e >= prev { e - prev } else { e + z.range - prev }; // wrapped
-                w.insert(z.name.clone(), d as f64 / 1e6 / s);
+                if let Some(watts) = energy_watts(prev, e, z.range, s) {
+                    w.insert(z.name.clone(), watts);
+                }
             }
             z.last = Some(e);
         }
         let psys = *w.get("psys")?;
         let g = |k: &str| w.get(k).copied().unwrap_or(0.0);
-        self.rails = Some(Rails { package: g("package-0"), core: g("core"), uncore: g("uncore"), dram: g("dram"), psys });
+        self.rails = Some(Rails {
+            package: g("package-0"),
+            core: g("core"),
+            uncore: g("uncore"),
+            dram: g("dram"),
+            psys,
+        });
         self.live_rails = true;
         Some(psys)
     }
@@ -361,7 +484,10 @@ impl Sampler {
         if !self.lpi.exists() || self.deep.is_empty() {
             return None;
         }
-        let (wall, idle) = self.deep.iter().fold((0.0, 0.0), |(w, i), (dw, di)| (w + dw, i + di));
+        let (wall, idle) = self
+            .deep
+            .iter()
+            .fold((0.0, 0.0), |(w, i), (dw, di)| (w + dw, i + di));
         Some((idle / wall * 100.0).min(100.0))
     }
 
@@ -403,9 +529,25 @@ impl Sampler {
     }
 }
 
+fn energy_watts(previous: i64, current: i64, range: i64, seconds: f64) -> Option<f64> {
+    if previous < 0 || current < 0 || range <= 0 || !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    let delta = if current >= previous {
+        current as i128 - previous as i128
+    } else {
+        current as i128 + range as i128 - previous as i128
+    };
+    (delta >= 0).then_some(delta as f64 / 1e6 / seconds)
+}
+
 fn mean<'a>(it: impl Iterator<Item = &'a f64>) -> f64 {
     let (n, sum) = it.fold((0, 0.0), |(n, s), v| (n + 1, s + v));
-    if n == 0 { 0.0 } else { sum / n as f64 }
+    if n == 0 {
+        0.0
+    } else {
+        sum / n as f64
+    }
 }
 
 fn push5<T>(q: &mut VecDeque<T>, v: T) {
@@ -450,6 +592,42 @@ fn read_rails() -> Option<Rails> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn energy_delta_handles_wrap_and_invalid_intervals() {
+        assert_eq!(
+            energy_watts(1_000_000, 5_000_000, 10_000_000, 2.0),
+            Some(2.0)
+        );
+        assert_eq!(
+            energy_watts(9_000_000, 1_000_000, 10_000_000, 1.0),
+            Some(2.0)
+        );
+        assert_eq!(energy_watts(0, 1, 10, 0.0), None);
+        assert_eq!(energy_watts(0, 1, 10, f64::NAN), None);
+        assert_eq!(energy_watts(-1, 1, 10, 1.0), None);
+    }
+
+    #[test]
+    fn slow_attributes_reuse_cached_value() {
+        let mut attr = Attr::new("/definitely-not-a-real-sysfs-file").slow();
+        attr.cached = Some((Instant::now(), Some("cached".into())));
+        assert_eq!(attr.text().as_deref(), Some("cached"));
+        attr.cached = Some((
+            Instant::now() - Duration::from_secs(11),
+            Some("expired".into()),
+        ));
+        assert_eq!(attr.text(), None);
+    }
+
+    #[test]
+    fn process_scan_waits_for_accounting_window() {
+        let mut sm = Sampler::new();
+        let baseline = Instant::now();
+        sm.last_process_scan = Some(baseline);
+        sm.tick();
+        assert_eq!(sm.last_process_scan, Some(baseline));
+    }
 
     #[test]
     fn parses_stat_with_spaces_and_parens_in_name() {

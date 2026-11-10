@@ -24,20 +24,38 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
 fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
-    if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
+    if r < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(r)
+    }
 }
 
 fn timerfd() -> io::Result<OwnedFd> {
     // SAFETY: plain syscall; the fd is owned immediately.
-    let fd = cvt(unsafe { libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_CLOEXEC | libc::TFD_NONBLOCK) })?;
+    let fd = cvt(unsafe {
+        libc::timerfd_create(
+            libc::CLOCK_MONOTONIC,
+            libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
+        )
+    })?;
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn arm(fd: &OwnedFd, period: Option<Duration>) {
-    let ts = |d: Duration| libc::timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ };
+    let ts = |d: Duration| libc::timespec {
+        tv_sec: d.as_secs() as _,
+        tv_nsec: d.subsec_nanos() as _,
+    };
     let spec = match period {
-        Some(p) => libc::itimerspec { it_interval: ts(p), it_value: ts(p) },
-        None => libc::itimerspec { it_interval: ts(Duration::ZERO), it_value: ts(Duration::ZERO) },
+        Some(p) => libc::itimerspec {
+            it_interval: ts(p),
+            it_value: ts(p),
+        },
+        None => libc::itimerspec {
+            it_interval: ts(Duration::ZERO),
+            it_value: ts(Duration::ZERO),
+        },
     };
     // SAFETY: valid fd and spec.
     unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &spec, std::ptr::null_mut()) };
@@ -51,8 +69,16 @@ fn signals() -> io::Result<OwnedFd> {
         for s in [libc::SIGWINCH, libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
             libc::sigaddset(&mut set, s);
         }
-        cvt(libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()))?;
-        let fd = cvt(libc::signalfd(-1, &set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK))?;
+        cvt(libc::sigprocmask(
+            libc::SIG_BLOCK,
+            &set,
+            std::ptr::null_mut(),
+        ))?;
+        let fd = cvt(libc::signalfd(
+            -1,
+            &set,
+            libc::SFD_CLOEXEC | libc::SFD_NONBLOCK,
+        ))?;
         Ok(OwnedFd::from_raw_fd(fd))
     }
 }
@@ -73,7 +99,11 @@ fn uevents() -> Option<OwnedFd> {
         let mut sa: libc::sockaddr_nl = std::mem::zeroed();
         sa.nl_family = libc::AF_NETLINK as _;
         sa.nl_groups = 1;
-        let r = libc::bind(fd.as_raw_fd(), &sa as *const _ as *const libc::sockaddr, std::mem::size_of_val(&sa) as _);
+        let r = libc::bind(
+            fd.as_raw_fd(),
+            &sa as *const _ as *const libc::sockaddr,
+            std::mem::size_of_val(&sa) as _,
+        );
         (r == 0).then_some(fd)
     }
 }
@@ -89,7 +119,9 @@ fn drain_uevents(fd: RawFd) -> bool {
             return hit;
         }
         let msg = &buf[..n as usize];
-        hit |= msg.split(|&b| b == 0).any(|f| f == b"SUBSYSTEM=power_supply");
+        hit |= msg
+            .split(|&b| b == 0)
+            .any(|f| f == b"SUBSYSTEM=power_supply");
     }
 }
 
@@ -102,7 +134,11 @@ fn inotify_dir(dir: &str) -> Option<OwnedFd> {
             return None;
         }
         let fd = OwnedFd::from_raw_fd(fd);
-        let wd = libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), libc::IN_CLOSE_WRITE | libc::IN_MODIFY | libc::IN_CREATE);
+        let wd = libc::inotify_add_watch(
+            fd.as_raw_fd(),
+            path.as_ptr(),
+            libc::IN_CLOSE_WRITE | libc::IN_MODIFY | libc::IN_CREATE,
+        );
         (wd >= 0).then_some(fd)
     }
 }
@@ -154,9 +190,17 @@ fn main() -> io::Result<()> {
     let ino = inotify_dir(sample::PROFILER_DIR);
 
     terminal::enable_raw_mode()?;
-    execute!(io::stdout(), terminal::EnterAlternateScreen, crossterm::cursor::Hide)?;
+    execute!(
+        io::stdout(),
+        terminal::EnterAlternateScreen,
+        crossterm::cursor::Hide
+    )?;
     let restore = || {
-        let _ = execute!(io::stdout(), crossterm::cursor::Show, terminal::LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            crossterm::cursor::Show,
+            terminal::LeaveAlternateScreen
+        );
         let _ = terminal::disable_raw_mode();
     };
     let mut term = match Terminal::new(CrosstermBackend::new(io::stdout())) {
@@ -168,19 +212,51 @@ fn main() -> io::Result<()> {
     };
 
     let result = (|| -> io::Result<()> {
-        let mut visible = niri.as_ref().map_or(true, |n| n.visible());
+        let mut visible = niri.as_ref().is_none_or(|n| n.visible());
         arm(&timer, visible.then_some(Duration::from_secs(1)));
         term.draw(|f| ui::render(f, &mut sm))?;
         let mut rails_dirty = false;
 
         loop {
             let mut fds = vec![
-                libc::pollfd { fd: timer.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: sig.as_raw_fd(), events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: 0, events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: uev.as_ref().map_or(-1, |f| f.as_raw_fd()), events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: ino.as_ref().map_or(-1, |f| f.as_raw_fd()), events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: niri.as_ref().map_or(-1, |n| n.fd()), events: libc::POLLIN, revents: 0 },
+                libc::pollfd {
+                    fd: timer.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: sig.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: 0,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: if visible {
+                        uev.as_ref().map_or(-1, |f| f.as_raw_fd())
+                    } else {
+                        -1
+                    },
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: if visible && !sm.live_rails {
+                        ino.as_ref().map_or(-1, |f| f.as_raw_fd())
+                    } else {
+                        -1
+                    },
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: niri.as_ref().map_or(-1, |n| n.fd()),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             // SAFETY: fds is a valid array for its length.
             let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
@@ -197,7 +273,11 @@ fn main() -> io::Result<()> {
                 // SAFETY: signalfd reads are whole signalfd_siginfo records.
                 let mut info: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
                 while unsafe {
-                    libc::read(sig.as_raw_fd(), (&mut info as *mut libc::signalfd_siginfo).cast(), std::mem::size_of_val(&info))
+                    libc::read(
+                        sig.as_raw_fd(),
+                        (&mut info as *mut libc::signalfd_siginfo).cast(),
+                        std::mem::size_of_val(&info),
+                    )
                 } > 0
                 {
                     if info.ssi_signo as i32 == libc::SIGWINCH {
@@ -226,7 +306,7 @@ fn main() -> io::Result<()> {
                 if !alive {
                     niri = None; // compositor gone: always draw
                 }
-                let now_visible = niri.as_ref().map_or(true, |n| n.visible());
+                let now_visible = niri.as_ref().is_none_or(|n| n.visible());
                 if now_visible != visible {
                     visible = now_visible;
                     if visible {
@@ -248,7 +328,10 @@ fn main() -> io::Result<()> {
             }
             if ready(0) {
                 drain(timer.as_raw_fd());
-                if rails_dirty {
+                if !visible {
+                    continue;
+                }
+                if rails_dirty && !sm.live_rails {
                     sm.load_rails();
                     rails_dirty = false;
                 }

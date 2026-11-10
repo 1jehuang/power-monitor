@@ -26,17 +26,32 @@ fn s(text: impl Into<String>, fg: Color) -> Span<'static> {
     Span::styled(text.into(), Style::default().fg(fg))
 }
 fn b(text: impl Into<String>, fg: Color) -> Span<'static> {
-    Span::styled(text.into(), Style::default().fg(fg).add_modifier(Modifier::BOLD))
+    Span::styled(
+        text.into(),
+        Style::default().fg(fg).add_modifier(Modifier::BOLD),
+    )
 }
 fn key(k: &str) -> Span<'static> {
     s(format!("{k:<6} "), MUTED)
 }
 
 fn good_high(p: f64) -> Color {
-    if p > 50.0 { GREEN } else if p > 20.0 { YELLOW } else { RED }
+    if p > 50.0 {
+        GREEN
+    } else if p > 20.0 {
+        YELLOW
+    } else {
+        RED
+    }
 }
 pub fn draw_color(w: f64) -> Color {
-    if w < 6.0 { GREEN } else if w < 12.0 { YELLOW } else { RED }
+    if w < 6.0 {
+        GREEN
+    } else if w < 12.0 {
+        YELLOW
+    } else {
+        RED
+    }
 }
 
 fn meter(pct: f64, cells: usize, color: Color) -> Vec<Span<'static>> {
@@ -53,7 +68,9 @@ fn hm(h: f64) -> String {
 
 /// Fit a line into `cells` display cells, ending with an ellipsis if cut.
 fn clip(line: Line<'static>, cells: usize) -> Line<'static> {
-    if cells == 0 { return Line::default(); }
+    if cells == 0 {
+        return Line::default();
+    }
     if line.width() <= cells {
         return line;
     }
@@ -91,9 +108,14 @@ struct Card {
 }
 
 fn card(f: &mut Frame, area: Rect, c: Card) {
-    if area.width < 2 || area.height < 2 { return; }
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
     let title_budget = area.width.saturating_sub(2) as usize;
-    let left = clip(Line::from(vec![s("─", BORDER), b(format!(" {} ", c.title), LABEL)]), title_budget);
+    let left = clip(
+        Line::from(vec![s("─", BORDER), b(format!(" {} ", c.title), LABEL)]),
+        title_budget,
+    );
     let right_budget = title_budget.saturating_sub(left.width() + 1);
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -132,7 +154,11 @@ fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
         return vec![Line::default(); rows];
     }
     let vals = &hist[hist.len().saturating_sub(cells)..];
-    let peak = vals.iter().copied().filter(|v| v.is_finite()).fold(1.0, f64::max);
+    let peak = vals
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(1.0, f64::max);
     let top = (peak * 1.15 / 5.0).ceil() * 5.0;
     let mut dots = vec![0u8; cells * rows];
     let mut colors = vec![DIM; cells * rows];
@@ -151,7 +177,9 @@ fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
         colors[idx] = draw_color(value);
     };
     for (i, &v) in vals.iter().enumerate() {
-        if !v.is_finite() { continue; }
+        if !v.is_finite() {
+            continue;
+        }
         let x = offset + i * 2;
         mark(x, y(v), v);
         if let Some(&next) = vals.get(i + 1).filter(|v| v.is_finite()) {
@@ -160,9 +188,11 @@ fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
             let steps = (b - a).unsigned_abs().max(2);
             for step in 0..=steps {
                 let t = step as f64 / steps as f64;
-                mark(x + (t * 2.0).round() as usize,
+                mark(
+                    x + (t * 2.0).round() as usize,
                     (a as f64 + (b - a) as f64 * t).round() as usize,
-                    v + (next - v) * t);
+                    v + (next - v) * t,
+                );
             }
         } else {
             mark(x + 1, y(v), v);
@@ -170,26 +200,38 @@ fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
     }
     (0..rows)
         .map(|r| {
-            Line::from((0..cells).map(|c| {
-                let i = r * cells + c;
-                let mut mask = dots[i];
-                let mut fill_color = DIM;
-                for dx in 0..2 {
-                    if let Some((edge, value)) = contour[c * 2 + dx] {
-                        const BITS: [[u8; 4]; 2] = [[0, 1, 2, 6], [3, 4, 5, 7]];
-                        for dy in 0..4 {
-                            if r * 4 + dy > edge {
-                                mask |= 1 << BITS[dx][dy];
+            Line::from(
+                (0..cells)
+                    .map(|c| {
+                        let i = r * cells + c;
+                        let mut mask = dots[i];
+                        let mut fill_color = DIM;
+                        for dx in 0..2 {
+                            if let Some((edge, value)) = contour[c * 2 + dx] {
+                                const BITS: [[u8; 4]; 2] = [[0, 1, 2, 6], [3, 4, 5, 7]];
+                                for (dy, bit) in BITS[dx].iter().enumerate() {
+                                    if r * 4 + dy > edge {
+                                        mask |= 1 << bit;
+                                    }
+                                }
+                                let depth = (r * 4).saturating_sub(edge) as f64
+                                    / (height - edge).max(1) as f64;
+                                fill_color =
+                                    shade(draw_color(value), 0.60 - 0.44 * depth.clamp(0.0, 1.0));
                             }
                         }
-                        let depth = (r * 4).saturating_sub(edge) as f64
-                            / (height - edge).max(1) as f64;
-                        fill_color = shade(draw_color(value), 0.60 - 0.44 * depth.clamp(0.0, 1.0));
-                    }
-                }
-                let ch = if mask == 0 { ' ' } else { char::from_u32(0x2800 + mask as u32).unwrap() };
-                s(ch.to_string(), if dots[i] != 0 { colors[i] } else { fill_color })
-            }).collect::<Vec<_>>())
+                        let ch = if mask == 0 {
+                            ' '
+                        } else {
+                            char::from_u32(0x2800 + mask as u32).unwrap()
+                        };
+                        s(
+                            ch.to_string(),
+                            if dots[i] != 0 { colors[i] } else { fill_color },
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
         })
         .collect()
 }
@@ -211,18 +253,30 @@ fn card_areas(area: Rect) -> (Rect, Rect, Rect, Rect) {
     let cw = if two { cols / 2 } else { cols };
     if two {
         let small = 5;
-        let [bt, t] = Layout::vertical([Constraint::Length(small), Constraint::Fill(1)]).areas(area);
+        let [bt, t] =
+            Layout::vertical([Constraint::Length(small), Constraint::Fill(1)]).areas(area);
         let [p, w] = Layout::horizontal([Constraint::Length(cw), Constraint::Fill(1)]).areas(t);
         let [ba, pr] = Layout::horizontal([Constraint::Length(cw), Constraint::Fill(1)]).areas(bt);
         (p, w, ba, pr)
     } else if cols < 60 {
-        let [ba, pr, rest] = Layout::vertical([Constraint::Length(5), Constraint::Length(if rows >= 14 { 5 } else { 0 }), Constraint::Fill(1)]).areas(area);
-        let [p, w] = Layout::vertical([Constraint::Min(6), Constraint::Length(if rows >= 24 { 7 } else { 0 })]).areas(rest);
+        let [ba, pr, rest] = Layout::vertical([
+            Constraint::Length(5),
+            Constraint::Length(if rows >= 14 { 5 } else { 0 }),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        let [p, w] = Layout::vertical([
+            Constraint::Min(6),
+            Constraint::Length(if rows >= 24 { 7 } else { 0 }),
+        ])
+        .areas(rest);
         (p, w, ba, pr)
     } else {
         let small = 5;
-        let [bt, rest] = Layout::vertical([Constraint::Length(small), Constraint::Fill(1)]).areas(area);
-        let [ba, pr] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(bt);
+        let [bt, rest] =
+            Layout::vertical([Constraint::Length(small), Constraint::Fill(1)]).areas(area);
+        let [ba, pr] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(bt);
         let [p, w] = if rows < 18 {
             Layout::vertical([Constraint::Fill(1), Constraint::Length(0)]).areas(rest)
         } else {
@@ -240,7 +294,11 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
     let avg = sm.avg();
     let bat_avg = sm.bat_avg();
     let now_w = sm.hist.back().copied().unwrap_or(bat.watts);
-    let src = if sm.live_rails { "RAPL psys, exact 1 s energy" } else { "battery sensor" };
+    let src = if sm.live_rails {
+        "RAPL psys, 1 s energy"
+    } else {
+        "battery sensor"
+    };
     let deep = sm.deep_idle();
     let top = sm.top();
     let total_cpu: f64 = top.iter().map(|(p, _)| p).sum::<f64>() + 0.0;
@@ -257,26 +315,46 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
             s("   peak ", MUTED),
             s(format!("{:.1} W", sm.peak()), TEXT),
         ]),
-        Line::from(vec![key("history"), s(format!("{}s · {src}", hist.len().min(inner_w.saturating_sub(6))), DIM)]),
+        Line::from(vec![
+            key("history"),
+            s(
+                format!("{}s · {src}", hist.len().min(inner_w.saturating_sub(6))),
+                DIM,
+            ),
+        ]),
     ];
     // Reserve a fixed axis gutter. Keep the approved trace/fill raster intact.
     let plot_w = inner_w.saturating_sub(6);
-    let peak = hist.iter().rev().take(plot_w).copied().filter(|v| v.is_finite()).fold(1.0, f64::max);
+    let peak = hist
+        .iter()
+        .rev()
+        .take(plot_w)
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(1.0, f64::max);
     let scale = (peak * 1.15 / 5.0).ceil() * 5.0;
     for (i, line) in chart(&hist, plot_w, chart_rows).into_iter().enumerate() {
-        let label = if i == 0 { format!("{scale:>3.0}W ┤") }
-            else if i + 1 == chart_rows { "  0W ┤".into() }
-            else { "     │".into() };
+        let label = if i == 0 {
+            format!("{scale:>3.0}W ┤")
+        } else if i + 1 == chart_rows {
+            "  0W ┤".into()
+        } else {
+            "     │".into()
+        };
         let mut spans = vec![s(label, DIM)];
         spans.extend(line.spans);
         rows_p.push(Line::from(spans));
     }
-    card(f, power_a, Card {
-        title: "⚡ power",
-        right: vec![s(format!("{avg:.1} W"), draw_color(avg)), s(" avg", DIM)],
-        footer: vec![s("green <6 W   yellow <12 W   red", DIM)],
-        rows: rows_p,
-    });
+    card(
+        f,
+        power_a,
+        Card {
+            title: "⚡ power",
+            right: vec![s(format!("{avg:.1} W"), draw_color(avg)), s(" avg", DIM)],
+            footer: vec![s("green <6 W   yellow <12 W   red", DIM)],
+            rows: rows_p,
+        },
+    );
 
     // ---- why ----
     let mut why = Vec::new();
@@ -285,29 +363,52 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
         let sep = || s(" · ", DIM);
         why.push(Line::from(vec![
             key("split"),
-            s(format!("cpu {:.1}", r.core), TEXT), sep(),
-            s(format!("gpu/uncore {:.1}", r.uncore), TEXT), sep(),
-            s(format!("ram {:.1}", r.dram), TEXT), sep(),
-            s(format!("soc {soc:.1}"), TEXT), s(" W", DIM),
+            s(format!("cpu {:.1}", r.core), TEXT),
+            sep(),
+            s(format!("uncore {:.1}", r.uncore), TEXT),
+            s(" W", DIM),
         ]));
         why.push(Line::from(vec![
             key(""),
-            s(format!("platform {:.1}", (r.psys - r.package).max(0.0)), TEXT), sep(),
-            s(format!("battery says {bat_avg:.1}"), TEXT), s(" W", DIM),
+            s(format!("ram {:.1}", r.dram), TEXT),
+            sep(),
+            s(format!("soc {soc:.1}"), TEXT),
+            s(" W", DIM),
+        ]));
+        why.push(Line::from(vec![
+            key(""),
+            s(
+                format!("platform {:.1}", (r.psys - r.package).max(0.0)),
+                TEXT,
+            ),
+            sep(),
+            s(format!("battery {bat_avg:.1}"), TEXT),
+            s(" W", DIM),
         ]));
     }
     why.push(Line::from(vec![
         key("cpu"),
         s(format!("{total_cpu:.0}%"), TEXT),
-        s(format!(" of one core, {:.0}% of all {}", total_cpu / sm.ncpu as f64, sm.ncpu), DIM),
+        s(
+            format!(
+                " of one core, {:.0}% of all {}",
+                total_cpu / sm.ncpu as f64,
+                sm.ncpu
+            ),
+            DIM,
+        ),
     ]));
     let mut hints: Vec<(Color, String)> = Vec::new();
     const COMPILERS: [&str; 6] = ["rustc", "cargo", "jr-cargo", "cc1plus", "ld", "mold"];
-    if top.iter().take(40).any(|(p, k)| *p >= 1.0 && COMPILERS.contains(&k.as_str())) {
+    if top
+        .iter()
+        .take(40)
+        .any(|(p, k)| *p >= 1.0 && COMPILERS.contains(&k.as_str()))
+    {
         hints.push((RED, "local compile running".into()));
     }
     if deep.is_some_and(|d| d < 5.0) {
-        hints.push((YELLOW, "chip never deep-sleeps: constant wakeups".into()));
+        hints.push((YELLOW, "low deep idle: devices or wakeups".into()));
     }
     if let Some(br) = bright.filter(|b| *b > 40) {
         hints.push((YELLOW, format!("screen at {br}%, the OLED is a big share")));
@@ -316,66 +417,139 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
         hints.push((YELLOW, format!("busy CPU: {total_cpu:.0}% of a core")));
     }
     if sm.jcode > 10 {
-        hints.push((DIM, format!("{} jcode processes redrawing", sm.jcode)));
+        hints.push((DIM, format!("{} jcode processes running", sm.jcode)));
     }
     hints.truncate(3);
-    let room = (why_a.height as usize).saturating_sub(2).saturating_sub(why.len());
+    let room = (why_a.height as usize)
+        .saturating_sub(2)
+        .saturating_sub(why.len());
     let shown_hints = room.saturating_sub(4).min(hints.len());
     for (c, h) in hints.into_iter().take(shown_hints) {
         why.push(Line::from(s(format!("● {h}"), c)));
     }
     why.push(Line::from(s("top by cpu", MUTED)));
-    let pw = (why_a.width as usize).saturating_sub(4 + 2 + 14 + 1 + 6 + 1).max(4);
+    let pw = (why_a.width as usize)
+        .saturating_sub(4 + 2 + 14 + 1 + 6 + 1)
+        .max(4);
     let nprocs = room.saturating_sub(1 + shown_hints).max(3);
     for (p, k) in top.iter().take(nprocs) {
-        let col = if *p >= 50.0 { RED } else if *p >= 10.0 { YELLOW } else { MUTED };
+        let col = if *p >= 50.0 {
+            RED
+        } else if *p >= 10.0 {
+            YELLOW
+        } else {
+            MUTED
+        };
         let name: String = k.chars().take(14).collect();
-        let mut l = vec![s(format!("  {name:<14}"), TEXT), s(format!(" {p:5.1}% "), col)];
+        let mut l = vec![
+            s(format!("  {name:<14}"), TEXT),
+            s(format!(" {p:5.1}% "), col),
+        ];
         l.extend(meter(p.min(100.0), pw, col));
         why.push(Line::from(l));
     }
-    card(f, why_a, Card {
-        title: "🔍 why",
-        right: vec![s(format!("{avg:.1} W"), draw_color(avg))],
-        footer: vec![s("cpu % of one core, last 5 s", DIM)],
-        rows: why,
-    });
+    card(
+        f,
+        why_a,
+        Card {
+            title: "🔍 why",
+            right: vec![s(format!("{avg:.1} W"), draw_color(avg))],
+            footer: vec![s("cpu % of one core, last 5 s", DIM)],
+            rows: why,
+        },
+    );
 
     // ---- battery ----
     let (time_line, state) = match bat.status.as_str() {
         "Discharging" => (
-            vec![b(hm(bat.wh_now / bat_avg), TEXT), s(" left   ", MUTED), s(format!("{} from full", hm(bat.wh_full / bat_avg)), DIM)],
-            s(if bat_a.width < 40 { "▼ drain" } else { "▼ discharging" }, RED),
+            vec![
+                b(hm(bat.wh_now / bat_avg), TEXT),
+                s(" left   ", MUTED),
+                s(format!("{} from full", hm(bat.wh_full / bat_avg)), DIM),
+            ],
+            s(
+                if bat_a.width < 40 {
+                    "▼ drain"
+                } else {
+                    "▼ discharging"
+                },
+                RED,
+            ),
         ),
         "Charging" => (
-            vec![b(hm((bat.wh_full - bat.wh_now) / bat_avg), TEXT), s(" to full", MUTED)],
-            s(if bat_a.width < 40 { "▲ charge" } else { "▲ charging" }, GREEN),
+            vec![
+                b(hm((bat.wh_full - bat.wh_now) / bat_avg), TEXT),
+                s(" to full", MUTED),
+            ],
+            s(
+                if bat_a.width < 40 {
+                    "▲ charge"
+                } else {
+                    "▲ charging"
+                },
+                GREEN,
+            ),
         ),
-        other => (vec![s(other.to_string(), MUTED)], s(other.to_lowercase(), BLUE)),
+        other => (
+            vec![s(other.to_string(), MUTED)],
+            s(other.to_lowercase(), BLUE),
+        ),
     };
     let compact_battery = bat_a.width < 48;
-    let mut charge = vec![s(if bat_a.width >= 20 { "charge " } else { "" }, MUTED), b(format!("{}% ", bat.capacity), good_high(bat.capacity as f64))];
-    charge.extend(meter(bat.capacity as f64, (bat_a.width as usize).saturating_sub(17), good_high(bat.capacity as f64)));
+    let mut charge = vec![
+        s(if bat_a.width >= 20 { "charge " } else { "" }, MUTED),
+        b(
+            format!("{}% ", bat.capacity),
+            good_high(bat.capacity as f64),
+        ),
+    ];
+    charge.extend(meter(
+        bat.capacity as f64,
+        (bat_a.width as usize).saturating_sub(17),
+        good_high(bat.capacity as f64),
+    ));
     let mut tl = vec![s(if bat_a.width >= 20 { "time   " } else { "" }, MUTED)];
     tl.extend(if bat_a.width < 20 && bat.status == "Discharging" {
         vec![b(hm(bat.wh_now / bat_avg), TEXT)]
     } else if compact_battery && bat.status == "Discharging" {
         vec![b(hm(bat.wh_now / bat_avg), TEXT), s(" left", MUTED)]
-    } else { time_line });
-    card(f, bat_a, Card {
-        title: "🔋 battery",
-        right: vec![state],
-        footer: vec![],
-        rows: vec![
-            Line::from(charge),
-            Line::from(tl),
-            Line::from(vec![
-                s(if bat_a.width >= 30 { "energy " } else { "" }, MUTED),
-                s(if bat_a.width >= 20 { format!("{:.1}/{:.1}Wh", bat.wh_now, bat.wh_full) } else { format!("{:.0}/{:.0}Wh", bat.wh_now, bat.wh_full) }, TEXT),
-                s(if bat_a.width >= 36 { format!(" · {}% health", bat.health) } else if bat_a.width >= 20 { format!(" · {}%", bat.health) } else { String::new() }, DIM),
-            ]),
-        ],
+    } else {
+        time_line
     });
+    card(
+        f,
+        bat_a,
+        Card {
+            title: "🔋 battery",
+            right: vec![state],
+            footer: vec![],
+            rows: vec![
+                Line::from(charge),
+                Line::from(tl),
+                Line::from(vec![
+                    s(if bat_a.width >= 30 { "energy " } else { "" }, MUTED),
+                    s(
+                        if bat_a.width >= 20 {
+                            format!("{:.1}/{:.1}Wh", bat.wh_now, bat.wh_full)
+                        } else {
+                            format!("{:.0}/{:.0}Wh", bat.wh_now, bat.wh_full)
+                        },
+                        TEXT,
+                    ),
+                    s(
+                        if bat_a.width >= 36 {
+                            format!(" · {}% health", bat.health)
+                        } else if bat_a.width >= 20 {
+                            format!(" · {}%", bat.health)
+                        } else {
+                            String::new()
+                        },
+                        DIM,
+                    ),
+                ]),
+            ],
+        },
+    );
 
     // ---- profile ----
     let prof = sm.profile.text().unwrap_or_else(|| "?".into());
@@ -392,29 +566,36 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
         }
         None => idle.push(s("n/a", DIM)),
     }
-    let mut prow = vec![
-        Line::from(idle),
-        Line::from(vec![
-            key("platform"),
-            s(prof, pcol),
-            s("   epp ", MUTED),
-            s(sm.epp.text().unwrap_or_else(|| "?".into()), TEXT),
-            s("   gov ", MUTED),
-            s(sm.gov.text().unwrap_or_else(|| "?".into()), TEXT),
-        ]),
-    ];
+    let epp = sm.epp.text().unwrap_or_else(|| "?".into());
+    let epp_short = match epp.as_str() {
+        "balance_power" => "bal-power",
+        "balance_performance" => "bal-perf",
+        "performance" => "perf",
+        other => other,
+    };
+    let mut policy = vec![s(prof, pcol), s(" · epp:", MUTED), s(epp_short, TEXT)];
+    let gov = sm.gov.text().unwrap_or_else(|| "?".into());
+    let policy_width: usize = policy.iter().map(|s| s.content.width()).sum();
+    if policy_width + 3 + gov.width() <= prof_a.width.saturating_sub(4) as usize {
+        policy.extend([s(" · ", MUTED), s(gov, TEXT)]);
+    }
+    let mut prow = vec![Line::from(idle), Line::from(policy)];
     if let Some(br) = bright {
         let mut l = vec![key("screen")];
         l.extend(meter(br as f64, mc, PINK));
         l.push(s(format!(" {br:3}%"), TEXT));
         prow.push(Line::from(l));
     }
-    card(f, prof_a, Card {
-        title: "⚙ profile",
-        right: vec![s("idle >70%", DIM)],
-        footer: vec![s("q quit", DIM)],
-        rows: prow,
-    });
+    card(
+        f,
+        prof_a,
+        Card {
+            title: "⚙ profile",
+            right: vec![s("idle >70%", DIM)],
+            footer: vec![s("q quit", DIM)],
+            rows: prow,
+        },
+    );
 }
 
 #[cfg(test)]
@@ -425,29 +606,63 @@ mod tests {
     #[test]
     fn responsive_rendered_layouts() {
         let mut sm = Sampler::new();
-        sm.bat_state = crate::sample::BatState { status: "Discharging".into(), capacity: 73, watts: 8.0, wh_now: 42.0, wh_full: 57.5, health: 92 };
+        sm.bat_state = crate::sample::BatState {
+            status: "Discharging".into(),
+            capacity: 73,
+            watts: 8.0,
+            wh_now: 42.0,
+            wh_full: 57.5,
+            health: 92,
+        };
         sm.bat_hist = [8.0; 60].into();
-        sm.profile = crate::sample::Attr::new("/nonexistent/power-monitor-test-profile");
-        sm.epp = crate::sample::Attr::new("/nonexistent/power-monitor-test-epp");
-        sm.gov = crate::sample::Attr::new("/nonexistent/power-monitor-test-gov");
-        sm.hist = (0..64).map(|i| 4.0 + (i as f64 / 7.0).sin().abs() * 14.0).collect();
-        for (width, height) in [(120, 32), (90, 24), (80, 16), (64, 24), (64, 12), (40, 16), (24, 12), (12, 8), (2, 2), (1, 1)] {
+        sm.demo_activity();
+        sm.hist = (0..64)
+            .map(|i| 4.0 + (i as f64 / 7.0).sin().abs() * 14.0)
+            .collect();
+        for (width, height) in [
+            (120, 32),
+            (90, 24),
+            (80, 16),
+            (64, 24),
+            (64, 12),
+            (40, 16),
+            (24, 12),
+            (12, 8),
+            (2, 2),
+            (1, 1),
+        ] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|f| render(f, &mut sm)).unwrap();
             let buffer = terminal.backend().buffer();
-            let lines: Vec<String> = (0..height).map(|y| {
-                (0..width).map(|x| buffer[(x, y)].symbol()).collect()
-            }).collect();
+            let lines: Vec<String> = (0..height)
+                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
             println!("LAYOUT {width}x{height}\n{}", lines.join("\n"));
             // Actual rendered cells preserve the colours and wide-character slots.
-            let spans: Vec<Vec<_>> = (0..height).map(|y| (0..width).map(|x| {
-                let cell = &buffer[(x, y)];
-                (cell.symbol().to_string(), format!("{:?}", cell.fg), format!("{:?}", cell.bg), format!("{:?}", cell.modifier))
-            }).collect()).collect();
-            println!("LAYOUT_SPANS {width}x{height} {}", serde_json::to_string(&spans).unwrap());
+            let spans: Vec<Vec<_>> = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| {
+                            let cell = &buffer[(x, y)];
+                            (
+                                cell.symbol().to_string(),
+                                format!("{:?}", cell.fg),
+                                format!("{:?}", cell.bg),
+                                format!("{:?}", cell.modifier),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            println!(
+                "LAYOUT_SPANS {width}x{height} {}",
+                serde_json::to_string(&spans).unwrap()
+            );
             let (power, why, battery, profile) = card_areas(Rect::new(0, 0, width, height));
             assert_eq!(battery.y, 0);
-            if width >= 60 { assert_eq!(profile.y, 0); }
+            if width >= 60 {
+                assert_eq!(profile.y, 0);
+            }
             assert!(power.y >= battery.bottom());
             assert!(why.y >= profile.bottom());
             if width >= 40 && height >= 16 {
@@ -455,16 +670,33 @@ mod tests {
                 assert!(lines.iter().any(|line| line.contains("profile")));
                 let text = lines.join("\n");
                 assert!(text.contains("power"));
-                if why.height >= 2 { assert!(text.contains("why")); }
+                if why.height >= 2 {
+                    assert!(text.contains("why"));
+                }
                 assert!(text.contains("73%"), "charge hidden at {width}x{height}");
-                assert!(text.contains("5h 15m"), "runtime hidden at {width}x{height}");
-                assert!(text.contains("42.0/57.5Wh"), "energy hidden at {width}x{height}");
-                assert!(text.contains("W ┤"), "missing chart scale at {width}x{height}");
+                assert!(
+                    text.contains("5h 15m"),
+                    "runtime hidden at {width}x{height}"
+                );
+                assert!(
+                    text.contains("42.0/57.5Wh"),
+                    "energy hidden at {width}x{height}"
+                );
+                assert!(
+                    text.contains("W ┤"),
+                    "missing chart scale at {width}x{height}"
+                );
             }
             if width == 24 {
                 let text = lines.join("\n");
                 assert!(text.contains("42.0/57.5Wh · 92%"));
                 assert!(text.contains("5h 15m left"));
+            }
+            if width >= 90 && height >= 24 {
+                let text = lines.join("\n");
+                assert!(text.contains("ram 0.3"));
+                assert!(text.contains("soc 1.6"));
+                assert!(text.contains("powersave"));
             }
             if (width, height) == (64, 12) {
                 let text = lines.join("\n");
@@ -479,12 +711,20 @@ mod tests {
     fn card_chrome_does_not_overlap() {
         for width in [12, 18, 24, 32, 48] {
             let mut terminal = Terminal::new(TestBackend::new(width, 4)).unwrap();
-            terminal.draw(|f| card(f, f.area(), Card {
-                title: "battery",
-                right: vec![s("STATUS", GREEN)],
-                footer: vec![s("footer text that must remain inside its border", DIM)],
-                rows: vec![Line::from("content")],
-            })).unwrap();
+            terminal
+                .draw(|f| {
+                    card(
+                        f,
+                        f.area(),
+                        Card {
+                            title: "battery",
+                            right: vec![s("STATUS", GREEN)],
+                            footer: vec![s("footer text that must remain inside its border", DIM)],
+                            rows: vec![Line::from("content")],
+                        },
+                    )
+                })
+                .unwrap();
             let buffer = terminal.backend().buffer();
             let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
             assert!(top.contains("battery"));
@@ -524,7 +764,10 @@ mod tests {
             assert_eq!(lines.len(), height);
             for l in lines {
                 assert_eq!(l.width(), width);
-                assert!(l.to_string().chars().all(|c| c == ' ' || ('\u{2800}'..='\u{28ff}').contains(&c)));
+                assert!(l
+                    .to_string()
+                    .chars()
+                    .all(|c| c == ' ' || ('\u{2800}'..='\u{28ff}').contains(&c)));
             }
         }
     }
@@ -540,16 +783,23 @@ mod tests {
     fn chart_fill_matches_hue_and_fades_downward() {
         for watts in [4.0, 9.0, 18.0] {
             let lines = chart(&[watts; 4], 4, 12);
-            let filled: Vec<_> = lines.iter().filter_map(|l| {
-                let span = &l.spans[0];
-                (span.content == "⣿").then_some(span.style.fg.unwrap())
-            }).collect();
+            let filled: Vec<_> = lines
+                .iter()
+                .filter_map(|l| {
+                    let span = &l.spans[0];
+                    (span.content == "⣿").then_some(span.style.fg.unwrap())
+                })
+                .collect();
             assert!(filled.len() >= 3);
             let base = draw_color(watts);
-            let Color::Rgb(br, bg, bb) = base else { unreachable!() };
+            let Color::Rgb(br, bg, bb) = base else {
+                unreachable!()
+            };
             let mut previous = 1000u16;
             for color in filled {
-                let Color::Rgb(r, g, b) = color else { unreachable!() };
+                let Color::Rgb(r, g, b) = color else {
+                    unreachable!()
+                };
                 assert!(r as u16 + g as u16 + b as u16 <= previous);
                 previous = r as u16 + g as u16 + b as u16;
                 assert!((r as f64 / br as f64 - g as f64 / bg as f64).abs() < 0.02);
@@ -561,16 +811,28 @@ mod tests {
     #[test]
     fn chart_design_preview() {
         // Deterministic samples include all colour bands and a sharp spike.
-        let data: Vec<_> = (0..64).map(|i| {
-            4.0 + (i as f64 / 7.0).sin().abs() * 7.0
-                + if (30..35).contains(&i) { 9.0 } else { 0.0 }
-        }).collect();
+        let data: Vec<_> = (0..64)
+            .map(|i| {
+                4.0 + (i as f64 / 7.0).sin().abs() * 7.0
+                    + if (30..35).contains(&i) { 9.0 } else { 0.0 }
+            })
+            .collect();
         for width in [64, 24] {
             let lines = chart(&data, width, 14);
-            let spans: Vec<Vec<_>> = lines.iter().map(|l| l.spans.iter().map(|s| {
-                let Color::Rgb(r,g,b) = s.style.fg.unwrap() else { unreachable!() };
-                (s.content.to_string(), r, g, b)
-            }).collect()).collect();
+            let spans: Vec<Vec<_>> = lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| {
+                            let Color::Rgb(r, g, b) = s.style.fg.unwrap() else {
+                                unreachable!()
+                            };
+                            (s.content.to_string(), r, g, b)
+                        })
+                        .collect()
+                })
+                .collect();
             println!("CHART_PREVIEW {}", serde_json::to_string(&spans).unwrap());
         }
     }
