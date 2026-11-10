@@ -121,21 +121,50 @@ fn card(f: &mut Frame, area: Rect, c: Card) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Multi-row bar chart, newest sample on the right.
+/// Unfilled connected Braille trace, two by four dots per terminal cell.
 fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
+    if cells == 0 || rows == 0 {
+        return vec![Line::default(); rows];
+    }
     let vals = &hist[hist.len().saturating_sub(cells)..];
-    let top = vals.iter().copied().fold(1.0, f64::max);
-    const EIGHTHS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
-    (0..rows)
-        .rev()
-        .map(|r| {
-            let mut spans = vec![Span::raw(" ".repeat(cells - vals.len()))];
-            for &v in vals {
-                let e = v / top * rows as f64 * 8.0 - r as f64 * 8.0;
-                let ch = if e >= 8.0 { '█' } else { EIGHTHS[e.max(0.0) as usize] };
-                spans.push(s(ch.to_string(), draw_color(v)));
+    let peak = vals.iter().copied().filter(|v| v.is_finite()).fold(1.0, f64::max);
+    let top = (peak * 1.15 / 5.0).ceil() * 5.0;
+    let mut dots = vec![0u8; cells * rows];
+    let mut colors = vec![DIM; cells * rows];
+    let height = rows * 4;
+    let offset = (cells - vals.len()) * 2;
+    let y = |v: f64| ((1.0 - (v / top).clamp(0.0, 1.0)) * (height - 1) as f64).round() as usize;
+    let mut mark = |x: usize, yy: usize, value: f64| {
+        const BITS: [[u8; 4]; 2] = [[0, 1, 2, 6], [3, 4, 5, 7]];
+        let idx = yy / 4 * cells + x / 2;
+        dots[idx] |= 1 << BITS[x % 2][yy % 4];
+        colors[idx] = draw_color(value);
+    };
+    for (i, &v) in vals.iter().enumerate() {
+        if !v.is_finite() { continue; }
+        let x = offset + i * 2;
+        mark(x, y(v), v);
+        if let Some(&next) = vals.get(i + 1).filter(|v| v.is_finite()) {
+            let a = y(v) as isize;
+            let b = y(next) as isize;
+            let steps = (b - a).unsigned_abs().max(2);
+            for step in 0..=steps {
+                let t = step as f64 / steps as f64;
+                mark(x + (t * 2.0).round() as usize,
+                    (a as f64 + (b - a) as f64 * t).round() as usize,
+                    v + (next - v) * t);
             }
-            Line::from(spans)
+        } else {
+            mark(x + 1, y(v), v);
+        }
+    }
+    (0..rows)
+        .map(|r| {
+            Line::from((0..cells).map(|c| {
+                let i = r * cells + c;
+                let ch = if dots[i] == 0 { ' ' } else { char::from_u32(0x2800 + dots[i] as u32).unwrap() };
+                s(ch.to_string(), colors[i])
+            }).collect::<Vec<_>>())
         })
         .collect()
 }
@@ -347,6 +376,25 @@ mod tests {
         assert_eq!(hm(1.5), "1h 30m");
         assert_eq!(hm(f64::INFINITY), "--");
         assert_eq!(hm(0.0), "--");
+    }
+
+    #[test]
+    fn chart_is_unfilled_braille_and_handles_edges() {
+        for (values, width, height) in [
+            (vec![0.0, 100.0, 0.0], 3, 8),
+            (vec![2.0], 1, 1),
+            (vec![], 10, 3),
+            (vec![f64::NAN, f64::INFINITY], 2, 2),
+            (vec![1.0], 0, 3),
+            (vec![1.0], 3, 0),
+        ] {
+            let lines = chart(&values, width, height);
+            assert_eq!(lines.len(), height);
+            for l in lines {
+                assert_eq!(l.width(), width);
+                assert!(l.to_string().chars().all(|c| c == ' ' || ('\u{2800}'..='\u{28ff}').contains(&c)));
+            }
+        }
     }
 
     #[test]
