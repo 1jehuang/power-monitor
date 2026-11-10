@@ -170,6 +170,38 @@ impl ProcScan {
     }
 }
 
+/// Live RAPL energy counters (`intel-rapl:*`). Differencing a monotonic
+/// energy counter gives the exact average power over the interval, so short
+/// spikes between reads are counted, unlike instantaneous battery readings.
+struct RaplZone {
+    name: String,
+    energy: Attr,
+    range: i64,
+    last: Option<i64>,
+}
+
+fn rapl_zones() -> Vec<RaplZone> {
+    let mut v = Vec::new();
+    let Ok(dir) = fs::read_dir("/sys/class/powercap") else { return v };
+    for e in dir.flatten() {
+        let d = e.path();
+        if !e.file_name().to_string_lossy().starts_with("intel-rapl:") {
+            continue;
+        }
+        let Ok(name) = fs::read_to_string(d.join("name")) else { continue };
+        let energy = Attr::new(d.join("energy_uj").to_string_lossy().into_owned());
+        if energy.file.is_none() {
+            continue;
+        }
+        let range = fs::read_to_string(d.join("max_energy_range_uj"))
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(i64::MAX);
+        v.push(RaplZone { name: name.trim().to_string(), energy, range, last: None });
+    }
+    v
+}
+
 pub const PROFILER_DIR: &str = "/var/log/battery-profiler";
 
 pub struct Sampler {
@@ -186,7 +218,12 @@ pub struct Sampler {
 
     pub hz: f64,
     pub ncpu: usize,
+    /// Graph series: live psys watts when RAPL is readable, else battery.
     pub hist: VecDeque<f64>,
+    /// Battery discharge watts (whole laptop incl. screen), for time left.
+    pub bat_hist: VecDeque<f64>,
+    rapl: Vec<RaplZone>,
+    pub live_rails: bool,
     pub bat_state: BatState,
     pub rails: Option<Rails>,
     pub jcode: usize,
@@ -211,6 +248,9 @@ impl Sampler {
             hz: (unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).max(1) as f64,
             ncpu: (unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }).max(1) as usize,
             hist: VecDeque::with_capacity(300),
+            bat_hist: VecDeque::with_capacity(60),
+            rapl: rapl_zones(),
+            live_rails: false,
             bat_state: BatState::default(),
             rails: None,
             jcode: 0,
@@ -246,6 +286,9 @@ impl Sampler {
     pub fn rebaseline(&mut self) {
         self.deep.clear();
         self.cpu.clear();
+        for z in &mut self.rapl {
+            z.last = z.energy.num();
+        }
         self.procs.scan();
         self.last = Some((Instant::now(), self.lpi.num()));
     }
@@ -253,10 +296,18 @@ impl Sampler {
     pub fn tick(&mut self) {
         let now = Instant::now();
         self.read_battery();
-        if self.hist.len() == 300 {
-            self.hist.pop_front();
+        if self.bat_hist.len() == 60 {
+            self.bat_hist.pop_front();
         }
-        self.hist.push_back(self.bat_state.watts);
+        self.bat_hist.push_back(self.bat_state.watts);
+        let secs = self.last.map(|(t, _)| now.duration_since(t).as_secs_f64());
+        let live = self.read_rapl(secs);
+        if let Some(w) = live.or((self.rapl.is_empty() || !self.live_rails).then_some(self.bat_state.watts)) {
+            if self.hist.len() == 300 {
+                self.hist.pop_front();
+            }
+            self.hist.push_back(w);
+        }
 
         let lpi = self.lpi.num();
         let (deltas, jcode) = self.procs.scan();
@@ -273,12 +324,32 @@ impl Sampler {
         self.last = Some((now, lpi));
     }
 
-    pub fn avg(&self) -> f64 {
-        let n = self.hist.len().min(60);
-        if n == 0 {
-            return 0.0;
+    /// Read every RAPL counter; returns psys watts once two reads exist.
+    fn read_rapl(&mut self, secs: Option<f64>) -> Option<f64> {
+        let mut w: HashMap<String, f64> = HashMap::new();
+        for z in &mut self.rapl {
+            let Some(e) = z.energy.num() else { continue };
+            if let (Some(prev), Some(s)) = (z.last, secs.filter(|s| *s > 0.0)) {
+                let d = if e >= prev { e - prev } else { e + z.range - prev }; // wrapped
+                w.insert(z.name.clone(), d as f64 / 1e6 / s);
+            }
+            z.last = Some(e);
         }
-        self.hist.iter().rev().take(n).sum::<f64>() / n as f64
+        let psys = *w.get("psys")?;
+        let g = |k: &str| w.get(k).copied().unwrap_or(0.0);
+        self.rails = Some(Rails { package: g("package-0"), core: g("core"), uncore: g("uncore"), dram: g("dram"), psys });
+        self.live_rails = true;
+        Some(psys)
+    }
+
+    /// One-minute mean of the graph series.
+    pub fn avg(&self) -> f64 {
+        mean(self.hist.iter().rev().take(60))
+    }
+
+    /// One-minute mean battery discharge: the whole-laptop figure.
+    pub fn bat_avg(&self) -> f64 {
+        mean(self.bat_hist.iter())
     }
 
     pub fn peak(&self) -> f64 {
@@ -323,10 +394,18 @@ impl Sampler {
     /// Latest 30 s RAPL split from the battery profiler's log, if readable.
     /// Keeps the last good value when the newest line is incomplete.
     pub fn load_rails(&mut self) {
+        if self.live_rails {
+            return;
+        }
         if let Some(r) = read_rails() {
             self.rails = Some(r);
         }
     }
+}
+
+fn mean<'a>(it: impl Iterator<Item = &'a f64>) -> f64 {
+    let (n, sum) = it.fold((0, 0.0), |(n, s), v| (n + 1, s + v));
+    if n == 0 { 0.0 } else { sum / n as f64 }
 }
 
 fn push5<T>(q: &mut VecDeque<T>, v: T) {

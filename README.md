@@ -30,3 +30,16 @@ install -m644 power-monitor.desktop ~/.local/share/applications/
 The desktop entry opens it in kitty (`--class power-monitor`, used for the
 visibility check). `q`, Esc or Ctrl-C quits. The original Python version is
 kept in `legacy/`.
+
+## Live power from RAPL (recommended)
+
+`energy_uj` is root-only by default. `70-rapl-energy-read.rules` makes it
+readable by your group (edit the group name), after which the graph uses the
+`psys` energy counter: exact average watts over each second, spikes included.
+Without it the graph falls back to the battery's smoothed sensor. Time-left
+estimates always use battery discharge, which includes the screen.
+
+```sh
+sudo install -m644 70-rapl-energy-read.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger -s powercap -c add
+```

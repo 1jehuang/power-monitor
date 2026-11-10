@@ -166,6 +166,9 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
 
     let bat = sm.bat_state.clone();
     let avg = sm.avg();
+    let bat_avg = sm.bat_avg();
+    let now_w = sm.hist.back().copied().unwrap_or(bat.watts);
+    let src = if sm.live_rails { "RAPL psys, exact 1 s energy" } else { "battery sensor" };
     let deep = sm.deep_idle();
     let top = sm.top();
     let total_cpu: f64 = top.iter().map(|(p, _)| p).sum();
@@ -178,11 +181,11 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
     let mut rows_p = vec![
         Line::from(vec![
             key("now"),
-            b(format!("{:5.1} W", bat.watts), draw_color(bat.watts)),
+            b(format!("{now_w:5.1} W"), draw_color(now_w)),
             s("   peak ", MUTED),
             s(format!("{:.1} W", sm.peak()), TEXT),
         ]),
-        Line::from(vec![key("history"), s(format!("last {}s", hist.len().min(inner_w)), DIM)]),
+        Line::from(vec![key("history"), s(format!("last {}s · {src}", hist.len().min(inner_w)), DIM)]),
     ];
     rows_p.extend(chart(&hist, inner_w, chart_rows));
     card(f, power_a, Card {
@@ -207,7 +210,7 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
         why.push(Line::from(vec![
             key(""),
             s(format!("platform {:.1}", (r.psys - r.package).max(0.0)), TEXT), sep(),
-            s(format!("screen+rest ~{:.1}", (avg - r.psys).max(0.0)), TEXT), s(" W", DIM),
+            s(format!("battery says {bat_avg:.1}"), TEXT), s(" W", DIM),
         ]));
     }
     why.push(Line::from(vec![
@@ -258,11 +261,11 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
     // ---- battery ----
     let (time_line, state) = match bat.status.as_str() {
         "Discharging" => (
-            vec![b(hm(bat.wh_now / avg), TEXT), s(" left   ", MUTED), s(format!("{} from full", hm(bat.wh_full / avg)), DIM)],
+            vec![b(hm(bat.wh_now / bat_avg), TEXT), s(" left   ", MUTED), s(format!("{} from full", hm(bat.wh_full / bat_avg)), DIM)],
             s("▼ discharging", RED),
         ),
         "Charging" => (
-            vec![b(hm((bat.wh_full - bat.wh_now) / avg), TEXT), s(" to full", MUTED)],
+            vec![b(hm((bat.wh_full - bat.wh_now) / bat_avg), TEXT), s(" to full", MUTED)],
             s("▲ charging", GREEN),
         ),
         other => (vec![s(other.to_string(), MUTED)], s(other.to_lowercase(), BLUE)),
