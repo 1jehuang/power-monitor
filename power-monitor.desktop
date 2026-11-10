@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Power Monitor
+Comment=Live battery draw, time left, power profile and deep idle
+Exec=kitty --class power-monitor --title "Power Monitor" /home/jeremy/.local/bin/power-monitor
+Icon=battery
+Terminal=false
+Categories=System;Monitor;
+Keywords=battery;power;watts;draw;energy;
