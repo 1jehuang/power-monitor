@@ -221,14 +221,14 @@ def main():
                 pk, ps = rails['package'] or 0, rails['psys']
                 rest = max(0.0, avg - ps)
                 why.append(f'{MUTED}{"split":<9}{RST}{TEXT}cpu {rails["core"] or 0:.1f}{RST}{DIM} · {RST}{TEXT}gpu/uncore {rails["uncore"] or 0:.1f}{RST}{DIM} · {RST}{TEXT}ram {rails["dram"] or 0:.1f}{RST}{DIM} · {RST}{TEXT}soc {max(0, pk - (rails["core"] or 0) - (rails["uncore"] or 0)):.1f}{RST}{DIM} W{RST}')
-                why.append(f'{MUTED}{"":<9}{RST}{TEXT}platform {max(0, ps - pk):.1f}{RST}{DIM} · {RST}{TEXT}screen+rest ~{rest:.1f}{RST}{DIM} W  (30 s profiler){RST}')
+                why.append(f'{MUTED}{"":<9}{RST}{TEXT}platform {max(0, ps - pk):.1f}{RST}{DIM} · {RST}{TEXT}screen+rest ~{rest:.1f}{RST}{DIM} W{RST}')
             why.append(f'{MUTED}{"cpu":<9}{RST}{TEXT}{total_cpu:.0f}%{RST}{DIM} of one core, {total_cpu / NCPU:.0f}% of all {NCPU}{RST}')
             hints = []
             names = {k for _, k in top[:40] if _ >= 1}
             if {'rustc', 'cargo', 'jr-cargo', 'cc1plus', 'ld', 'mold'} & names:
                 hints.append((RED, 'local compile running'))
             if deep is not None and deep < 5:
-                hints.append((YELLOW, 'chip never sleeps deeply: something wakes it constantly'))
+                hints.append((YELLOW, 'chip never deep-sleeps: constant wakeups'))
             if bright is not None and bright > 40:
                 hints.append((YELLOW, f'screen at {bright}%, the OLED is a big share'))
             if total_cpu > 100:
@@ -236,13 +236,15 @@ def main():
             jc = sum(1 for p in os.listdir('/proc') if p.isdigit() and rd(f'/proc/{p}/comm') == 'jcode')
             if jc > 10:
                 hints.append((DIM, f'{jc} jcode processes redrawing'))
-            for c, h in hints[:3]:
-                why.append(f'{c}● {h}{RST}')
-            why.append(f'{MUTED}top by cpu{RST}')
-            pw = cw - 20
-            for p, k in top[:max(1, hs[1] - 2 - len(why))]:
+            room = max(0, hs[1] - 2 - len(why))
+            procs = [f'{MUTED}top by cpu{RST}']
+            pw = cw - 4 - 2 - 14 - 1 - 6 - 1
+            for p, k in top[:max(3, room - 1 - len(hints[:3]))]:
                 col = RED if p >= 50 else YELLOW if p >= 10 else MUTED
-                why.append(f'  {TEXT}{k[:14]:<14}{RST} {col}{p:5.1f}%{RST} {meter(min(100, p), max(4, pw - 6), col)}')
+                procs.append(f'  {TEXT}{k[:14]:<14}{RST} {col}{p:5.1f}%{RST} {meter(min(100, p), max(4, pw), col)}')
+            hint_rows = [f'{c}● {h}{RST}' for c, h in hints[:3]]
+            # Hints first if they fit beside at least 3 processes, else processes win.
+            why += hint_rows[:max(0, room - 4)] + procs
             cards.append(box(cw, '🔍 why', f'{draw_color(avg)}{avg:.1f} W{RST}', why, DIM + 'cpu % of one core, last 5 s' + RST, hs[1]))
 
             cards.append(box(cw, '🔋 battery', state, [
@@ -252,7 +254,7 @@ def main():
             ], '', hs[2]))
             dl = (f'{meter(deep, mc, good_high(deep))} {TEXT}{deep:3.0f}%{RST}'
                   if deep is not None else DIM + 'counter unavailable' + RST)
-            prow = [f'{MUTED}{"deep idle":<9}{RST}{dl}',
+            prow = [f'{MUTED}{"idle":<9}{RST}{dl}',
                     f'{MUTED}{"platform":<9}{RST}{pcol}{prof}{RST}   {MUTED}epp{RST} {TEXT}{epp}{RST}   {MUTED}gov{RST} {TEXT}{gov}{RST}']
             if bright is not None:
                 prow.append(f'{MUTED}{"screen":<9}{RST}{meter(bright, mc, PINK)} {TEXT}{bright:3d}%{RST}')
