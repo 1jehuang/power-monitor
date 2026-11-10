@@ -148,17 +148,17 @@ pub fn render(f: &mut Frame, sm: &mut Sampler) {
     let mc = (cw as usize).saturating_sub(18).max(6);
 
     let (power_a, why_a, bat_a, prof_a) = if two {
-        let top = rows.saturating_sub(6).max(7).min(rows);
-        let [t, bt] = Layout::vertical([Constraint::Length(top), Constraint::Fill(1)]).areas(area);
+        let small = 6.min(rows.saturating_sub(7));
+        let [bt, t] = Layout::vertical([Constraint::Length(small), Constraint::Fill(1)]).areas(area);
         let [p, w] = Layout::horizontal([Constraint::Length(cw), Constraint::Fill(1)]).areas(t);
         let [ba, pr] = Layout::horizontal([Constraint::Length(cw), Constraint::Fill(1)]).areas(bt);
         (p, w, ba, pr)
     } else {
-        let [p, w, ba, pr] = Layout::vertical([
+        let [ba, pr, p, w] = Layout::vertical([
+            Constraint::Length(5),
+            Constraint::Length(5),
             Constraint::Min(5),
             Constraint::Length(12),
-            Constraint::Length(5),
-            Constraint::Length(5),
         ])
         .areas(area);
         (p, w, ba, pr)
