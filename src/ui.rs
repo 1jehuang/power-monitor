@@ -133,8 +133,13 @@ fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
     let mut colors = vec![DIM; cells * rows];
     let height = rows * 4;
     let offset = (cells - vals.len()) * 2;
+    let mut contour = vec![None; cells * 2];
     let y = |v: f64| ((1.0 - (v / top).clamp(0.0, 1.0)) * (height - 1) as f64).round() as usize;
     let mut mark = |x: usize, yy: usize, value: f64| {
+        // Both the trace and its fill use this very same rasterized contour.
+        if contour[x].is_none_or(|(old, _)| yy < old) {
+            contour[x] = Some((yy, value));
+        }
         const BITS: [[u8; 4]; 2] = [[0, 1, 2, 6], [3, 4, 5, 7]];
         let idx = yy / 4 * cells + x / 2;
         dots[idx] |= 1 << BITS[x % 2][yy % 4];
@@ -162,20 +167,37 @@ fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
         .map(|r| {
             Line::from((0..cells).map(|c| {
                 let i = r * cells + c;
-                let ch = if dots[i] == 0 { ' ' } else { char::from_u32(0x2800 + dots[i] as u32).unwrap() };
-                if dots[i] != 0 {
-                    s(ch.to_string(), colors[i])
-                } else {
-                    let sample = c.checked_sub(offset / 2).and_then(|i| vals.get(i));
-                    if sample.is_some_and(|v| v.is_finite() && r * 4 > y(*v)) {
-                        s("⣿", Color::Rgb(45, 55, 60))
-                    } else {
-                        s(" ", DIM)
+                let mut mask = dots[i];
+                let mut fill_color = DIM;
+                for dx in 0..2 {
+                    if let Some((edge, value)) = contour[c * 2 + dx] {
+                        const BITS: [[u8; 4]; 2] = [[0, 1, 2, 6], [3, 4, 5, 7]];
+                        for dy in 0..4 {
+                            if r * 4 + dy > edge {
+                                mask |= 1 << BITS[dx][dy];
+                            }
+                        }
+                        let depth = (r * 4).saturating_sub(edge) as f64
+                            / (height - edge).max(1) as f64;
+                        fill_color = shade(draw_color(value), 0.60 - 0.44 * depth.clamp(0.0, 1.0));
                     }
                 }
+                let ch = if mask == 0 { ' ' } else { char::from_u32(0x2800 + mask as u32).unwrap() };
+                s(ch.to_string(), if dots[i] != 0 { colors[i] } else { fill_color })
             }).collect::<Vec<_>>())
         })
         .collect()
+}
+
+fn shade(color: Color, factor: f64) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f64 * factor) as u8,
+            (g as f64 * factor) as u8,
+            (b as f64 * factor) as u8,
+        ),
+        c => c,
+    }
 }
 
 pub fn render(f: &mut Frame, sm: &mut Sampler) {
@@ -411,6 +433,45 @@ mod tests {
         let lines = chart(&[5.0; 4], 4, 8);
         assert_eq!(lines[0].to_string(), "    ");
         assert_eq!(lines[7].to_string(), "⣿⣿⣿⣿");
+    }
+
+    #[test]
+    fn chart_fill_matches_hue_and_fades_downward() {
+        for watts in [4.0, 9.0, 18.0] {
+            let lines = chart(&[watts; 4], 4, 12);
+            let filled: Vec<_> = lines.iter().filter_map(|l| {
+                let span = &l.spans[0];
+                (span.content == "⣿").then_some(span.style.fg.unwrap())
+            }).collect();
+            assert!(filled.len() >= 3);
+            let base = draw_color(watts);
+            let Color::Rgb(br, bg, bb) = base else { unreachable!() };
+            let mut previous = 1000u16;
+            for color in filled {
+                let Color::Rgb(r, g, b) = color else { unreachable!() };
+                assert!(r as u16 + g as u16 + b as u16 <= previous);
+                previous = r as u16 + g as u16 + b as u16;
+                assert!((r as f64 / br as f64 - g as f64 / bg as f64).abs() < 0.02);
+                assert!((b as f64 / bb as f64 - g as f64 / bg as f64).abs() < 0.02);
+            }
+        }
+    }
+
+    #[test]
+    fn chart_design_preview() {
+        // Deterministic samples include all colour bands and a sharp spike.
+        let data: Vec<_> = (0..64).map(|i| {
+            4.0 + (i as f64 / 7.0).sin().abs() * 7.0
+                + if (30..35).contains(&i) { 9.0 } else { 0.0 }
+        }).collect();
+        for width in [64, 24] {
+            let lines = chart(&data, width, 14);
+            let spans: Vec<Vec<_>> = lines.iter().map(|l| l.spans.iter().map(|s| {
+                let Color::Rgb(r,g,b) = s.style.fg.unwrap() else { unreachable!() };
+                (s.content.to_string(), r, g, b)
+            }).collect()).collect();
+            println!("CHART_PREVIEW {}", serde_json::to_string(&spans).unwrap());
+        }
     }
 
     #[test]
