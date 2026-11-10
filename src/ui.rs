@@ -121,7 +121,7 @@ fn card(f: &mut Frame, area: Rect, c: Card) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Unfilled connected Braille trace, two by four dots per terminal cell.
+/// Connected Braille trace with a dim dotted fill beneath it.
 fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
     if cells == 0 || rows == 0 {
         return vec![Line::default(); rows];
@@ -163,7 +163,16 @@ fn chart(hist: &[f64], cells: usize, rows: usize) -> Vec<Line<'static>> {
             Line::from((0..cells).map(|c| {
                 let i = r * cells + c;
                 let ch = if dots[i] == 0 { ' ' } else { char::from_u32(0x2800 + dots[i] as u32).unwrap() };
-                s(ch.to_string(), colors[i])
+                if dots[i] != 0 {
+                    s(ch.to_string(), colors[i])
+                } else {
+                    let sample = c.checked_sub(offset / 2).and_then(|i| vals.get(i));
+                    if sample.is_some_and(|v| v.is_finite() && r * 4 > y(*v)) {
+                        s("⣿", Color::Rgb(45, 55, 60))
+                    } else {
+                        s(" ", DIM)
+                    }
+                }
             }).collect::<Vec<_>>())
         })
         .collect()
@@ -379,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn chart_is_unfilled_braille_and_handles_edges() {
+    fn chart_is_braille_and_handles_edges() {
         for (values, width, height) in [
             (vec![0.0, 100.0, 0.0], 3, 8),
             (vec![2.0], 1, 1),
@@ -395,6 +404,13 @@ mod tests {
                 assert!(l.to_string().chars().all(|c| c == ' ' || ('\u{2800}'..='\u{28ff}').contains(&c)));
             }
         }
+    }
+
+    #[test]
+    fn chart_fills_below_trace_not_above() {
+        let lines = chart(&[5.0; 4], 4, 8);
+        assert_eq!(lines[0].to_string(), "    ");
+        assert_eq!(lines[7].to_string(), "⣿⣿⣿⣿");
     }
 
     #[test]
