@@ -136,13 +136,60 @@ pub struct Rails {
     pub psys: f64,
 }
 
+/// Raise the descriptor limit to the hard limit and return how many stat fds
+/// the process scan may keep. Half the limit, because fds of processes that
+/// exited during a scan are only released at its end, and the rest of the
+/// monitor (sysfs attributes, timers, the terminal) needs its share.
+fn fd_budget() -> usize {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit/setrlimit with a valid, initialised rlimit struct.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return 256;
+        }
+        if lim.rlim_cur < lim.rlim_max {
+            let raised = libc::rlimit {
+                rlim_cur: lim.rlim_max.min(65_536),
+                rlim_max: lim.rlim_max,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
+                lim = raised;
+            }
+        }
+    }
+    usize::try_from(lim.rlim_cur / 2).unwrap_or(256).min(16_384)
+}
+
 /// Per-process CPU ticks, from `/proc/<pid>/stat` fds kept open.
+///
+/// Only `max_open` of them are kept. A machine can run more processes than
+/// the descriptor limit allows, and once the table is full `read_dir("/proc")`
+/// itself fails, which used to empty the process list entirely. Processes past
+/// the budget are opened and closed on each scan instead.
 struct ProcScan {
-    procs: HashMap<i32, (File, u64)>,
+    procs: HashMap<i32, (Option<File>, u64, u64)>,
+    max_open: usize,
+}
+
+struct StatSample {
+    name: String,
+    ticks: u64,
+    /// Boot-relative start time: tells a reused pid from the same process.
+    start: u64,
 }
 
 impl ProcScan {
-    fn parse(buf: &[u8]) -> Option<(String, u64)> {
+    fn new() -> Self {
+        Self {
+            procs: HashMap::new(),
+            max_open: fd_budget(),
+        }
+    }
+
+    fn parse(buf: &[u8]) -> Option<StatSample> {
         let s = std::str::from_utf8(buf).ok()?;
         let open = s.find('(')?;
         let close = s.rfind(')')?;
@@ -150,13 +197,24 @@ impl ProcScan {
         let mut f = s.get(close + 2..)?.split_ascii_whitespace();
         let utime: u64 = f.nth(11)?.parse().ok()?;
         let stime: u64 = f.next()?.parse().ok()?;
-        Some((name, utime + stime))
+        let start = f.nth(6).and_then(|v| v.parse().ok()).unwrap_or(0);
+        Some(StatSample {
+            name,
+            ticks: utime + stime,
+            start,
+        })
     }
 
-    fn read(file: &File) -> Option<(String, u64)> {
+    fn read(file: &File) -> Option<StatSample> {
         let mut buf = [0u8; 2048];
         let n = file.read_at(&mut buf, 0).ok()?;
         Self::parse(&buf[..n])
+    }
+
+    fn open_read(pid: i32) -> Option<(File, StatSample)> {
+        let file = File::open(format!("/proc/{pid}/stat")).ok()?;
+        let sample = Self::read(&file)?;
+        Some((file, sample))
     }
 
     /// CPU ticks per process name since the previous scan, plus the jcode count.
@@ -164,6 +222,7 @@ impl ProcScan {
         let mut deltas: HashMap<String, u64> = HashMap::new();
         let mut seen = HashSet::new();
         let mut jcode = 0;
+        let mut open = 0;
         let Ok(dir) = fs::read_dir("/proc") else {
             return (deltas, 0);
         };
@@ -172,28 +231,49 @@ impl ProcScan {
                 continue;
             };
             seen.insert(pid);
-            let mut cached = self.procs.remove(&pid);
-            let mut sample = cached.as_ref().and_then(|(f, _)| Self::read(f));
-            if sample.is_none() {
-                // New pid, or the old fd belongs to an exited task whose pid was reused.
-                cached = None;
-                if let Ok(f) = File::open(format!("/proc/{pid}/stat")) {
-                    sample = Self::read(&f);
-                    if let Some((_, t)) = &sample {
-                        cached = Some((f, *t));
+            let mut file = None;
+            let mut prev = None;
+            let mut sample = None;
+            match self.procs.remove(&pid) {
+                // A read through the old fd fails once that task has exited,
+                // so success means it is still the same process.
+                Some((Some(f), ticks, _)) => {
+                    if let Some(now) = Self::read(&f) {
+                        sample = Some(now);
+                        file = Some(f);
+                        prev = Some(ticks);
                     }
                 }
+                Some((None, ticks, start)) => {
+                    if let Some((f, now)) = Self::open_read(pid) {
+                        if now.start == start {
+                            prev = Some(ticks);
+                        }
+                        sample = Some(now);
+                        file = Some(f);
+                    }
+                }
+                None => {}
             }
-            let (Some((name, ticks)), Some((file, prev))) = (sample, cached) else {
+            if sample.is_none() {
+                // New pid, or the old fd belonged to an exited task whose pid was reused.
+                if let Some((f, now)) = Self::open_read(pid) {
+                    sample = Some(now);
+                    file = Some(f);
+                }
+            }
+            let Some(now) = sample else {
                 continue;
             };
-            if name == "jcode" {
+            if now.name == "jcode" {
                 jcode += 1;
             }
-            if ticks > prev {
-                *deltas.entry(name).or_default() += ticks - prev;
+            if let Some(prev) = prev.filter(|prev| now.ticks > *prev) {
+                *deltas.entry(now.name).or_default() += now.ticks - prev;
             }
-            self.procs.insert(pid, (file, ticks));
+            let keep = file.filter(|_| open < self.max_open);
+            open += usize::from(keep.is_some());
+            self.procs.insert(pid, (keep, now.ticks, now.start));
         }
         self.procs.retain(|pid, _| seen.contains(pid));
         (deltas, jcode)
@@ -319,9 +399,7 @@ impl Sampler {
                     Attr::new(format!("{d}/max_brightness")).slow(),
                 )
             }),
-            procs: ProcScan {
-                procs: HashMap::new(),
-            },
+            procs: ProcScan::new(),
             last: None,
             deep: VecDeque::with_capacity(5),
             cpu: VecDeque::with_capacity(5),
@@ -632,8 +710,43 @@ mod tests {
     #[test]
     fn parses_stat_with_spaces_and_parens_in_name() {
         let line = b"1234 (Web (Content) x) S 1 2 3 4 5 6 7 8 9 10 111 22 0 0 20 0 1 0";
-        let (name, ticks) = ProcScan::parse(line).unwrap();
-        assert_eq!(name, "Web (Content) x");
-        assert_eq!(ticks, 133);
+        let sample = ProcScan::parse(line).unwrap();
+        assert_eq!(sample.name, "Web (Content) x");
+        assert_eq!(sample.ticks, 133);
+        assert_eq!(sample.start, 0);
+        let line = b"7 (x) S 1 2 3 4 5 6 7 8 9 10 111 22 0 0 20 0 1 0 98765 4096 12";
+        assert_eq!(ProcScan::parse(line).unwrap().start, 98765);
+    }
+
+    /// With more processes than descriptors to spare, every process must
+    /// still be accounted. The monitor once kept one fd per process, ran into
+    /// the 1024 limit on a machine with ~950 processes, and showed none.
+    #[test]
+    fn process_scan_accounts_processes_past_the_fd_budget() {
+        for max_open in [0, 2] {
+            let mut scan = ProcScan {
+                procs: HashMap::new(),
+                max_open,
+            };
+            scan.scan();
+            let held = scan.procs.values().filter(|p| p.0.is_some()).count();
+            assert_eq!(held, max_open.min(scan.procs.len()));
+            assert!(scan.procs.len() > max_open);
+
+            let me = std::process::id() as i32;
+            let mine = ProcScan::open_read(me).unwrap().1;
+            // Burn enough CPU for several clock ticks.
+            let until = Instant::now() + Duration::from_millis(150);
+            while Instant::now() < until {
+                std::hint::black_box(0u64);
+            }
+            let (deltas, _) = scan.scan();
+            assert!(
+                deltas.get(&mine.name).is_some_and(|t| *t > 0),
+                "own CPU time missing with max_open={max_open}: {deltas:?}"
+            );
+            let held = scan.procs.values().filter(|p| p.0.is_some()).count();
+            assert!(held <= max_open);
+        }
     }
 }
